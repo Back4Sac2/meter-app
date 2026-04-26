@@ -4,6 +4,7 @@ import {
   StyleSheet, Pressable, ActivityIndicator, Platform,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as XLSX from 'xlsx';
 import { useStorage } from './useStorage';
 import type { MeterInsert } from './types';
@@ -37,17 +38,21 @@ const PREVIEW_COLS: { key: keyof MeterInsert; label: string }[] = [
 type Step = 1 | 2 | 3;
 type Props = { onClose: () => void; onImported: () => void };
 
-async function readWorkbook(uri: string): Promise<XLSX.WorkBook> {
+async function readWorkbook(uri: string): Promise<{ wb: XLSX.WorkBook; byteLength: number }> {
   if (Platform.OS === 'web') {
     const response = await fetch(uri);
     const buf = await response.arrayBuffer();
-    return XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const uint8 = new Uint8Array(buf);
+    return { wb: XLSX.read(uint8, { type: 'array' }), byteLength: uint8.length };
   }
-  const FileSystem = require('expo-file-system/legacy');
-  const base64: string = await FileSystem.readAsStringAsync(uri, {
+  // content:// → file:// 로 명시적 복사
+  const dest = FileSystem.cacheDirectory + 'meter_tmp.xlsx';
+  await FileSystem.copyAsync({ from: uri, to: dest });
+  const base64 = await FileSystem.readAsStringAsync(dest, {
     encoding: FileSystem.EncodingType.Base64,
   });
-  return XLSX.read(base64, { type: 'base64' });
+  const wb = XLSX.read(base64, { type: 'base64', cellDates: false, cellStyles: false, bookVBA: false, sheets: 0 });
+  return { wb, byteLength: base64.length };
 }
 
 export default function MeterExcelUpload({ onClose, onImported }: Props) {
@@ -65,20 +70,44 @@ export default function MeterExcelUpload({ onClose, onImported }: Props) {
     setLoading(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['*/*'],
+        type: Platform.OS === 'android'
+          ? ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+             'application/vnd.ms-excel',
+             'application/octet-stream',
+             '*/*']
+          : ['public.spreadsheet', 'com.microsoft.excel.xls',
+             'org.openxmlformats.spreadsheetml.sheet', '*/*'],
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
 
       const uri = result.assets[0].uri;
-      const wb = await readWorkbook(uri);
-      const ws = wb.Sheets[wb.SheetNames[0]];
+      const { wb, byteLength } = await readWorkbook(uri);
+      const sheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+
+      // ws 자체가 없는 경우 (부분 파싱)
+      if (!ws) {
+        setError(`[진단] ws=undefined. 파일크기:${byteLength}B SheetNames:${JSON.stringify(wb.SheetNames)} Sheets keys:${JSON.stringify(Object.keys(wb.Sheets))}`);
+        return;
+      }
+
       const allParsed = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
         defval: null, raw: false,
       });
 
+      // 진단: 파싱 결과 확인
+      if (allParsed.length === 0) {
+        const ref = (ws as Record<string, unknown>)['!ref'] ?? '없음';
+        setError(`[진단] 파일크기:${byteLength}B ref:${ref} 시트:${sheetName}`);
+        return;
+      }
+
       const dataRows = allParsed.slice(2);
-      if (dataRows.length === 0) { setError('시트에 데이터가 없습니다.'); return; }
+      if (dataRows.length === 0) {
+        setError(`[진단] 전체 파싱 ${allParsed.length}행 — 헤더 2행 제외 후 데이터 없음. 첫행 키: ${Object.keys(allParsed[0]).slice(0, 5).join(', ')}`);
+        return;
+      }
 
       const parsed: MeterInsert[] = dataRows.map((r) => {
         const row: Partial<MeterInsert> = {};
@@ -92,13 +121,16 @@ export default function MeterExcelUpload({ onClose, onImported }: Props) {
       });
 
       const blocks = [...new Set(parsed.map((r) => r.block).filter((b): b is string => !!b))].sort();
-      if (blocks.length === 0) { setError("'블록구분' 열을 찾을 수 없습니다."); return; }
+      if (blocks.length === 0) {
+        setError(`[진단] ${dataRows.length}행 파싱됨. 블록구분 열 없음. 첫행 키: ${Object.keys(dataRows[0]).slice(0, 8).join(', ')}`);
+        return;
+      }
 
       setAllRows(parsed);
       setBlockOptions(blocks);
       setStep(2);
-    } catch {
-      setError('파일을 읽는 중 오류가 발생했습니다.');
+    } catch (e) {
+      setError(`[오류] ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
