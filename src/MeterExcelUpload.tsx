@@ -37,19 +37,17 @@ const PREVIEW_COLS: { key: keyof MeterInsert; label: string }[] = [
 type Step = 1 | 2 | 3;
 type Props = { onClose: () => void; onImported: () => void };
 
-async function readFileAsArrayBuffer(uri: string): Promise<ArrayBuffer> {
+async function readWorkbook(uri: string): Promise<XLSX.WorkBook> {
   if (Platform.OS === 'web') {
     const response = await fetch(uri);
-    return response.arrayBuffer();
+    const buf = await response.arrayBuffer();
+    return XLSX.read(new Uint8Array(buf), { type: 'array' });
   }
   const FileSystem = require('expo-file-system/legacy');
   const base64: string = await FileSystem.readAsStringAsync(uri, {
     encoding: FileSystem.EncodingType.Base64,
   });
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
+  return XLSX.read(base64, { type: 'base64' });
 }
 
 export default function MeterExcelUpload({ onClose, onImported }: Props) {
@@ -73,8 +71,7 @@ export default function MeterExcelUpload({ onClose, onImported }: Props) {
       if (result.canceled) return;
 
       const uri = result.assets[0].uri;
-      const buf = await readFileAsArrayBuffer(uri);
-      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+      const wb = await readWorkbook(uri);
       const ws = wb.Sheets[wb.SheetNames[0]];
       const allParsed = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
         defval: null, raw: false,
