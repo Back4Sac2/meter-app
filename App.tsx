@@ -1,20 +1,29 @@
+import { Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import MeterScreen from './src/MeterScreen';
 
-export default function App() {
-  return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
-  );
+// expo-sqlite은 웹 미지원 → 웹에서는 인메모리 스토리지로 직접 렌더
+if (Platform.OS !== 'web') {
+  // 네이티브 전용 import는 dynamic require로 분리
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+export default function App() {
+  if (Platform.OS === 'web') {
+    return (
+      <>
+        <StatusBar style="light" />
+        <MeterScreen />
+      </>
+    );
+  }
+
+  // 네이티브: SQLiteProvider로 감싸기
+  const { SQLiteProvider } = require('expo-sqlite');
+  const { initDb } = require('./src/db');
+  return (
+    <SQLiteProvider databaseName="meter.db" onInit={initDb}>
+      <StatusBar style="light" backgroundColor="#09090b" />
+      <MeterScreen />
+    </SQLiteProvider>
+  );
+}
